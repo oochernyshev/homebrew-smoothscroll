@@ -70,28 +70,31 @@ func eventCallback(proxy: CGEventTapProxy,
         return Unmanaged.passUnretained(event)
     }
 
-    // Get the original delta
+    // Original delta
     let dy = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1)
 
-    // Smooth it
+    // Smooth delta
     let smoothDY = smoother.smooth(delta: CGFloat(dy))
 
     if debugEnabled {
         print("Scroll delta: \(dy) → smoothed: \(smoothDY)")
     }
 
-    // Try to inject a new smoothed event
+    // Scale up if too small (avoid rounding to zero)
+    let adjusted = max(min(smoothDY * 10, 100), -100)  // clamp to ±100
+
     if let newEvent = CGEvent(scrollWheelEvent2Source: nil,
-                              units: Config.scrollUnits,
+                              units: .pixel,   // use pixel for trackpads
                               wheelCount: 1,
-                              wheel1: Int32(smoothDY),
+                              wheel1: Int32(adjusted),
                               wheel2: 0,
                               wheel3: 0) {
-        newEvent.post(tap: .cgAnnotatedSessionEventTap)
-        return nil // block original only if injection worked
+        // Post at hardware event tap
+        newEvent.post(tap: .cghidEventTap)
+        return nil
     }
 
-    // Fallback: deliver the original event if we failed
+    // Fallback: pass original event
     return Unmanaged.passUnretained(event)
 }
 
