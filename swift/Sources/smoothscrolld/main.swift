@@ -1,10 +1,28 @@
 import Foundation
 import CoreGraphics
-import QuartzCore
+import QuartzCore   // for CACurrentMediaTime()
 
-// MARK: - CLI flags
-if CommandLine.arguments.contains("--version") {
-    print("smoothscrolld OK")
+// MARK: - Version
+let appVersion: String = "0.2.6" // can be injected via compiler flags later
+
+// MARK: - CLI Flags
+let args = CommandLine.arguments
+let debugEnabled = args.contains("--debug")
+
+if args.contains("--version") {
+    print("smoothscrolld \(appVersion)")
+    exit(0)
+}
+
+if args.contains("--help") {
+    print("""
+    smoothscrolld - smooth scrolling daemon for macOS
+
+    Options:
+      --version   Print version and exit
+      --debug     Enable debug logging
+      --help      Show this message
+    """)
     exit(0)
 }
 
@@ -15,6 +33,9 @@ struct Config {
 
     /// Scale multiplier for the final scroll delta
     static let scrollScale: CGFloat = 1.0
+
+    /// Scroll units: .line (typical mice) or .pixel (trackpads)
+    static let scrollUnits: CGScrollEventUnit = .line
 
     /// Run loop mode
     static let runLoopMode: CFRunLoopMode = .commonModes
@@ -49,20 +70,29 @@ func eventCallback(proxy: CGEventTapProxy,
         return Unmanaged.passUnretained(event)
     }
 
+    // Get the original delta
     let dy = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1)
+
+    // Smooth it
     let smoothDY = smoother.smooth(delta: CGFloat(dy))
 
-    // Block original event and inject smoothed one
+    if debugEnabled {
+        print("Scroll delta: \(dy) → smoothed: \(smoothDY)")
+    }
+
+    // Try to inject a new smoothed event
     if let newEvent = CGEvent(scrollWheelEvent2Source: nil,
-                              units: .pixel,
+                              units: Config.scrollUnits,
                               wheelCount: 1,
                               wheel1: Int32(smoothDY),
                               wheel2: 0,
                               wheel3: 0) {
         newEvent.post(tap: .cgAnnotatedSessionEventTap)
+        return nil // block original only if injection worked
     }
 
-    return nil
+    // Fallback: deliver the original event if we failed
+    return Unmanaged.passUnretained(event)
 }
 
 // MARK: - Event Tap Setup
