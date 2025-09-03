@@ -8,8 +8,8 @@ class Smoothscrolld < Formula
   depends_on xcode: :build
 
   def install
-    system "swift", "build", "-c", "release"
-    bin.install ".build/release/smoothscrolld"
+    system "swift", "build", "-c", "release", "--package-path", "swift"
+    bin.install "swift/.build/release/smoothscrolld"
   end
 
   service do
