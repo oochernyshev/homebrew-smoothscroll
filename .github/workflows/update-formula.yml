@@ -1,0 +1,49 @@
+name: Update Homebrew Formula
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  update-formula:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get release info
+        id: release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const release = context.payload.release
+            return {
+              tag_name: release.tag_name,
+              tarball_url: release.tarball_url
+            }
+          result-encoding: string
+
+      - name: Download source tarball
+        run: |
+          curl -L ${{ steps.release.outputs.tarball_url }} -o source.tar.gz
+
+      - name: Compute SHA256
+        id: sha
+        run: echo "sha256=$(shasum -a 256 source.tar.gz | awk '{print $1}')" >> $GITHUB_ENV
+
+      - name: Update Formula
+        run: |
+          sed -i.bak \
+            -e "s|url \".*\"|url \"https://github.com/${{ github.repository }}/archive/refs/tags/${{ steps.release.outputs.tag_name }}.tar.gz\"|" \
+            -e "s|sha256 \".*\"|sha256 \"${{ env.sha256 }}\"|" \
+            Formula/smoothscrolld.rb
+          rm -f Formula/smoothscrolld.rb.bak
+
+      - name: Commit changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/smoothscrolld.rb
+          git commit -m "chore: update formula for ${{ steps.release.outputs.tag_name }}"
+          git push
