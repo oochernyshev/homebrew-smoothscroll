@@ -71,7 +71,16 @@ func eventCallback(proxy: CGEventTapProxy,
     }
 
     // Original delta
-    let dy = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1)
+    let dyPoint = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1)
+    let dyFixed = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1)
+    let dyLegacy = event.getDoubleValueField(.scrollWheelEventDeltaAxis1)
+
+    let dy = (dyFixed != 0.0) ? dyFixed : (dyPoint != 0.0 ? dyPoint : dyLegacy)
+
+    // Ignore no-op events
+    if dy == 0.0 {
+        return Unmanaged.passUnretained(event)
+    }
 
     print("RAW delta: \(dy)")
 
