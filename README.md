@@ -1,27 +1,21 @@
-Sure thing! Here’s the **`README.md`** content packaged so you can download it directly as a file.
-# homebrew-smoothscroll
+# smoothscrolld 🍎
 
-🍎 A Homebrew tap for installing **smoothscrolld**, a lightweight macOS background daemon that adds smooth scrolling to any mouse.
+A lightweight macOS background daemon that adds **smooth scrolling** to any mouse.  
+This repository contains both:
+
+- The **source code** for `smoothscrolld`
+- The **Homebrew formula** for easy installation
 
 ---
 
-## 🔧 Installation
+## 🔧 Installation (via Homebrew)
 
-First, add the tap:
+Tap and install:
 
 ```bash
 brew tap oochernyshev/smoothscroll
-````
-
-Then install the daemon:
-
-```bash
 brew install smoothscrolld
-```
-
----
-
-## ▶️ Usage
+````
 
 Run it as a background service:
 
@@ -43,22 +37,60 @@ brew services list
 
 ---
 
-## 📦 Source Code
+## ▶️ Manual Build (Swift)
 
-The daemon source code lives in a separate repository:
+If you prefer to build directly from source:
 
-👉 [smoothscrolld on GitHub](https://github.com/oochernyshev/smoothscrolld)
+```bash
+git clone https://github.com/oochernyshev/homebrew-smoothscroll.git
+cd homebrew-smoothscroll
+swift build -c release
+```
 
-This repository (`homebrew-smoothscroll`) only contains the **Homebrew formula**.
+Binary will be at:
+
+```
+.build/release/smoothscrolld
+```
+
+Run it:
+
+```bash
+./.build/release/smoothscrolld
+```
+
+⚠️ Don’t forget to grant **Accessibility permissions** in
+`System Settings → Privacy & Security → Accessibility`.
+
+---
+
+## 📂 Repository Layout
+
+```
+homebrew-smoothscroll/
+ ├─ Formula/               # Homebrew formula(s)
+ │   └─ smoothscrolld.rb
+ ├─ Sources/               # Swift source code
+ │   └─ smoothscrolld/
+ │       └─ main.swift
+ ├─ Package.swift          # SwiftPM manifest
+ ├─ LICENSE
+ └─ README.md
+```
 
 ---
 
 ## 🔄 Updating the Formula
 
-When a new release is published in the [main repo](https://github.com/oochernyshev/smoothscrolld):
+When you publish a new release:
 
 1. Update the `url` and `sha256` in [`Formula/smoothscrolld.rb`](Formula/smoothscrolld.rb).
-2. Commit and push the changes here.
+2. Commit and push changes.
+3. Users can then update with:
+
+```bash
+brew upgrade smoothscrolld
+```
 
 ---
 
