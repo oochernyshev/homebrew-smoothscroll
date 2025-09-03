@@ -73,6 +73,8 @@ func eventCallback(proxy: CGEventTapProxy,
     // Original delta
     let dy = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1)
 
+    print("RAW delta: \(dy)")
+
     // Smooth delta
     let smoothDY = smoother.smooth(delta: CGFloat(dy))
 
@@ -112,4 +114,7 @@ guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap,
 let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
 CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, Config.runLoopMode)
 CGEvent.tapEnable(tap: tap, enable: true)
+
+print("Starting smoothscrolld service - OK")
+
 CFRunLoopRun()
