@@ -1,6 +1,12 @@
 import Foundation
 import CoreGraphics
 
+// MARK: - CLI flags
+if CommandLine.arguments.contains("--version") {
+    print("smoothscrolld OK")
+    exit(0)
+}
+
 // MARK: - Configuration Constants
 struct Config {
     /// Exponential smoothing factor (closer to 1.0 = smoother but slower response)
