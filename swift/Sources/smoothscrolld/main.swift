@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import QuartzCore
 
 // MARK: - CLI flags
 if CommandLine.arguments.contains("--version") {
