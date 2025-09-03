@@ -8,7 +8,7 @@ class Smoothscrolld < Formula
   depends_on xcode: :build
 
   def install
-    system "swift", "build", "-c", "release", "--package-path", "swift"
+    system "swift", "build", "-c", "release", "--disable-sandbox", "--package-path", "swift"
     bin.install "swift/.build/release/smoothscrolld"
   end
 
