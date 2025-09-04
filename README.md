@@ -1,7 +1,7 @@
 # smoothscrolld 🍎
 
 A lightweight macOS background daemon that adds **smooth scrolling** to any mouse.  
-This repository contains both:
+This repository contains:
 
 - The **source code** for `smoothscrolld`
 - The **Homebrew formula** for easy installation
@@ -42,28 +42,6 @@ brew services list
 ```
 
 ---
-
-## ▶️ Manual Build (Swift)
-
-If you prefer to build directly from source:
-
-```bash
-git clone https://github.com/oochernyshev/homebrew-smoothscroll.git
-cd homebrew-smoothscroll
-swift build -c release
-```
-
-Binary will be at:
-
-```
-.build/release/smoothscrolld
-```
-
-Run it:
-
-```bash
-./.build/release/smoothscrolld
-```
 
 ⚠️ Don’t forget to grant **Accessibility permissions** in
 `System Settings → Privacy & Security → Accessibility`.
