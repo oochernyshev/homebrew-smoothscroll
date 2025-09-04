@@ -1,11 +1,13 @@
 import Foundation
 import CoreGraphics
-import QuartzCore   // for CACurrentMediaTime()
+import QuartzCore
+import Darwin      // for setbuf
 
-// MARK: - Version
-let appVersion: String = "0.2.6" // can be injected via compiler flags later
+// Unbuffer stdout so prints show immediately even under launchd
+setbuf(__stdoutp, nil)
 
-// MARK: - CLI Flags
+// MARK: - Version / CLI
+let appVersion: String = "0.2.7"
 let args = CommandLine.arguments
 let debugEnabled = args.contains("--debug")
 
@@ -13,7 +15,6 @@ if args.contains("--version") {
     print("smoothscrolld \(appVersion)")
     exit(0)
 }
-
 if args.contains("--help") {
     print("""
     smoothscrolld - smooth scrolling daemon for macOS
@@ -26,109 +27,166 @@ if args.contains("--help") {
     exit(0)
 }
 
-// MARK: - Configuration Constants
+// MARK: - Config
 struct Config {
-    /// Exponential smoothing factor (closer to 1.0 = smoother but slower response)
-    static let smoothingFactor: CGFloat = 0.9
+    // Time constants (seconds): smaller = snappier, larger = smoother
+    static let tauTrackpad: CFTimeInterval = 0.035
+    static let tauMouse:    CFTimeInterval = 0.090
 
-    /// Scale multiplier for the final scroll delta
-    static let scrollScale: CGFloat = 1.0
+    // Gain per device (tweak to taste)
+    static let gainTrackpad: CGFloat = 1.0
+    static let gainMouse:    CGFloat = 0.7
 
-    /// Scroll units for synthetic events
-    static let scrollUnits: CGScrollEventUnit = .pixel
+    // Minimal “nudge” when we’d otherwise emit 0 but user is scrolling
+    static let minEmitEpsilon: CGFloat = 0.25 // in units of step (pixel/line)
 
-    /// Run loop mode
+    // Clamp per event to avoid huge spikes
+    static let maxEmitPerEvent: Int32 = 100
+
+    // Run loop mode
     static let runLoopMode: CFRunLoopMode = .commonModes
 }
 
-// Tag used to mark our synthetic events so we can ignore them in the tap.
-private let kSyntheticTag: Int64 = 0x5343524F4C // "SCROL" in ASCII
+// Tag for synthetic events so we can ignore them inside the tap
+private let kSyntheticTag: Int64 = 0x5343524F4C // "SCROL"
 
 // MARK: - Scroll Smoother
-class ScrollSmoother {
-    private var velocity: CGFloat = 0
+final class ScrollSmoother {
     private var lastTime: CFTimeInterval = CACurrentMediaTime()
+    private var filtered: CGFloat = 0         // low-pass output
+    private var accumulator: CGFloat = 0      // carries fractional remainder
 
-    func smooth(delta: CGFloat) -> CGFloat {
+    // rate-independent one-pole LPF with accumulator → integer steps
+    func step(delta: CGFloat, tau: CFTimeInterval, gain: CGFloat, stepUnit: CGFloat) -> Int32 {
         let now = CACurrentMediaTime()
-        let dt = now - lastTime
+        let dt = max(1e-4, now - lastTime)    // protect against 0
         lastTime = now
 
-        // Apply exponential smoothing
-        velocity = velocity * Config.smoothingFactor + delta * (1.0 - Config.smoothingFactor)
+        // 1st-order low-pass: y += a * (x - y), a = 1 - exp(-dt/tau)
+        let alpha = 1.0 - CGFloat(exp(-dt / tau))
+        filtered += alpha * (delta - filtered)
 
-        // Apply scale and normalize by ~60fps
-        return velocity * Config.scrollScale * CGFloat(dt * 60.0)
+        // accumulate (apply gain)
+        accumulator += filtered * gain
+
+        // How many whole stepUnits (pixels or lines) can we emit?
+        let rawSteps = accumulator / stepUnit
+        var emit = Int32(rawSteps.rounded(.towardZero))
+
+        // If user is scrolling but rounding killed it, nudge ±1
+        if emit == 0 && abs(filtered) / stepUnit >= Config.minEmitEpsilon {
+            emit = (filtered > 0) ? 1 : -1
+        }
+
+        // Clamp to sane range
+        emit = max(-Config.maxEmitPerEvent, min(Config.maxEmitPerEvent, emit))
+
+        // Remove emitted portion from accumulator
+        accumulator -= CGFloat(emit) * stepUnit
+        return emit
+    }
+
+    // Reset between gestures if needed
+    func reset() {
+        filtered = 0
+        accumulator = 0
+        lastTime = CACurrentMediaTime()
     }
 }
 
-// MARK: - Event Handling
 let smoother = ScrollSmoother()
+var gTap: CFMachPort? = nil
 
+// MARK: - Event Callback
 func eventCallback(proxy: CGEventTapProxy,
                    type: CGEventType,
                    event: CGEvent,
                    refcon: UnsafeMutableRawPointer?) -> Unmanaged<CGEvent>? {
 
-    // If the tap gets disabled, just pass events through.
+    // Re-enable tap if the system disabled it
+    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+        if debugEnabled { print("Event tap disabled (\(type.rawValue)). Re-enabling…") }
+        if let tap = gTap { CGEvent.tapEnable(tap: tap, enable: true) }
+        return Unmanaged.passUnretained(event)
+    }
+
     guard type == .scrollWheel else {
         return Unmanaged.passUnretained(event)
     }
 
-    // Ignore our own synthetic events so we don't create a feedback loop.
+    // Ignore our own synthetic events to avoid feedback
     if event.getIntegerValueField(.eventSourceUserData) == kSyntheticTag {
         return Unmanaged.passUnretained(event)
     }
 
-    // Read original delta (prefer fixed → point → legacy)
+    // Pass through momentum phase (let macOS inertia do its thing)
+    let momentumPhase = event.getIntegerValueField(.scrollWheelEventMomentumPhase)
+    if momentumPhase != 0 {
+        // Optional: reset our internal state between gestures
+        smoother.reset()
+        return Unmanaged.passUnretained(event)
+    }
+
+    // Trackpad gesture phase: reset when a new gesture begins
+    let phase = event.getIntegerValueField(.scrollWheelEventPhase)
+    if phase == 1 { // kCGScrollPhaseBegan == 1
+        smoother.reset()
+    }
+
+    // Detect device type (continuous devices are usually trackpads)
+    let isContinuous = event.getIntegerValueField(.scrollWheelEventIsContinuous) != 0
+    let units: CGScrollEventUnit = isContinuous ? .pixel : .line
+    let tau  = isContinuous ? Config.tauTrackpad  : Config.tauMouse
+    let gain = isContinuous ? Config.gainTrackpad : Config.gainMouse
+    let stepUnit: CGFloat = 1.0 // 1 pixel or 1 line per integer tick
+
+    // Read the original delta (prefer fixed → point → legacy)
     let dyFixed  = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1)
     let dyPoint  = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1)
     let dyLegacy = event.getDoubleValueField(.scrollWheelEventDeltaAxis1)
     let dy = (dyFixed != 0.0) ? dyFixed : (dyPoint != 0.0 ? dyPoint : dyLegacy)
 
-    // Ignore no-op events
     if dy == 0.0 {
         return Unmanaged.passUnretained(event)
     }
+    if debugEnabled { print("RAW dy: \(dy)  phase:\(phase) cont:\(isContinuous)") }
 
-    if debugEnabled {
-        print("RAW delta: \(dy)")
-    }
+    // Compute smoothed integer steps to emit
+    let emitSteps = smoother.step(delta: CGFloat(dy),
+                                  tau: tau,
+                                  gain: gain,
+                                  stepUnit: stepUnit)
 
-    // Smooth delta
-    let smoothDY = smoother.smooth(delta: CGFloat(dy))
+    if debugEnabled { print("emitSteps: \(emitSteps)") }
 
-    if debugEnabled {
-        print("Scroll delta: \(dy) → smoothed: \(smoothDY)")
-    }
-
-    // Scale & clamp (avoid rounding to 0 and crazy spikes)
-    let adjusted = max(min(smoothDY * 10, 100), -100)
-
-    // Create a new synthetic scroll event (tagged) and post it
-    if let src = CGEventSource(stateID: .hidSystemState),
-       let newEvent = CGEvent(scrollWheelEvent2Source: src,
-                              units: Config.scrollUnits,
-                              wheelCount: 1,
-                              wheel1: Int32(adjusted),
-                              wheel2: 0,
-                              wheel3: 0) {
-
-        // Mark event so our tap will ignore it
-        newEvent.setIntegerValueField(.eventSourceUserData, value: kSyntheticTag)
-
-        // Post at hardware tap so it behaves like a real scroll
-        newEvent.post(tap: .cghidEventTap)
-
-        // Drop original event to avoid double-scrolling
+    // If nothing to emit this tick, swallow the original and wait to accumulate
+    if emitSteps == 0 {
         return nil
     }
 
-    // Fallback: pass original event if we couldn't synthesize
+    // Synthesize a new scroll event with our steps
+    if let src = CGEventSource(stateID: .hidSystemState),
+       let newEvent = CGEvent(scrollWheelEvent2Source: src,
+                              units: units,
+                              wheelCount: 1,
+                              wheel1: emitSteps,
+                              wheel2: 0,
+                              wheel3: 0) {
+
+        // Preserve common flags that affect behavior
+        newEvent.setIntegerValueField(.keyboardEventAutorepeat, value: event.getIntegerValueField(.keyboardEventAutorepeat))
+        newEvent.setIntegerValueField(.eventSourceUserData, value: kSyntheticTag)
+
+        // Post at HID tap so it behaves like a real device event
+        newEvent.post(tap: .cghidEventTap)
+        return nil
+    }
+
+    // Fallback: pass original event if synth fails
     return Unmanaged.passUnretained(event)
 }
 
-// MARK: - Event Tap Setup
+// MARK: - Tap Setup
 let mask: CGEventMask = (1 << CGEventType.scrollWheel.rawValue)
 guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap,
                                   place: .headInsertEventTap,
@@ -136,12 +194,13 @@ guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap,
                                   eventsOfInterest: mask,
                                   callback: eventCallback,
                                   userInfo: nil) else {
-    fatalError("Failed to create event tap. Check Accessibility permissions.")
+    fatalError("Failed to create event tap. Check Accessibility + Input Monitoring permissions.")
 }
+gTap = tap
 
 let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
 CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, Config.runLoopMode)
 CGEvent.tapEnable(tap: tap, enable: true)
 
-print("Starting smoothscrolld service - OK")
+print("Starting smoothscrolld \(appVersion) — OK")
 CFRunLoopRun()
