@@ -64,36 +64,6 @@ Run it:
 
 ---
 
-## 📂 Repository Layout
-
-```
-homebrew-smoothscroll/
- ├─ Formula/               # Homebrew formula(s)
- │   └─ smoothscrolld.rb
- ├─ Sources/               # Swift source code
- │   └─ smoothscrolld/
- │       └─ main.swift
- ├─ Package.swift          # SwiftPM manifest
- ├─ LICENSE
- └─ README.md
-```
-
----
-
-## 🔄 Updating the Formula
-
-When you publish a new release:
-
-1. Update the `url` and `sha256` in [`Formula/smoothscrolld.rb`](Formula/smoothscrolld.rb).
-2. Commit and push changes.
-3. Users can then update with:
-
-```bash
-brew upgrade smoothscrolld
-```
-
----
-
 ## 📜 License
 
 MIT License © 2025 [Oleg Chernyshev](https://github.com/oochernyshev)
