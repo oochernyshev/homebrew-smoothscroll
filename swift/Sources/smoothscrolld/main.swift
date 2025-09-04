@@ -35,12 +35,12 @@ if args.contains("--help") {
 // MARK: - Config
 struct Config {
     // Core feel
-    static let pixelsPerLineBase: CGFloat = 20.0     // px per wheel "line" at slow cadence
-    static let tauVelocity: CFTimeInterval = 0.22    // s; larger = longer glide
+    static let pixelsPerLineBase: CGFloat = 18.0     // px per wheel "line" at slow cadence
+    static let tauVelocity: CFTimeInterval = 0.32    // s; larger = longer glide
     static let timerHz: CFTimeInterval = 240.0       // emission rate (≥120 recommended)
 
     // Acceleration for fast successive ticks
-    static let accelGain: CGFloat = 2.2
+    static let accelGain: CGFloat = 1.2
     static let accelHalfLife: CFTimeInterval = 0.10  // s
 
     // Momentum handoff (after last user tick)
@@ -56,7 +56,9 @@ struct Config {
     static let minAccStop: CGFloat = 0.02                  // px subpixel remainder to stop
     static let maxIntEmitPerTick: Int32 = 160              // safety (legacy int field)
     static let maxFloatEmitPerTick: CGFloat = 50.0         // safety (point/fixed fields)
-    static let maxVelocity: CGFloat = 8000.0
+    static let maxVelocity: CGFloat = 4000.0
+
+    static let maxImpulsePerDetent: CGFloat = 1600.0
 
     // Run loop mode
     static let runLoopMode: CFRunLoopMode = .commonModes
@@ -135,6 +137,9 @@ final class WheelAnimator {
 
         // Convert desired distance into a velocity impulse: integral ≈ v0 * tau => v0 = pixels / tau
         var impulse = pixels / CGFloat(Config.tauVelocity)
+        // Cap how hard a single detent can kick
+        if impulse >  Config.maxImpulsePerDetent { impulse =  Config.maxImpulsePerDetent }
+        if impulse < -Config.maxImpulsePerDetent { impulse = -Config.maxImpulsePerDetent }
 
         // Reverse-direction cancellation
         if vel * impulse < 0 {
