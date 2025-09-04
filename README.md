@@ -6,6 +6,12 @@ This repository contains both:
 - The **source code** for `smoothscrolld`
 - The **Homebrew formula** for easy installation
 
+✨ Features:
+- **Smooth**, velocity-based scrolling
+- **Inertial natural scrolling** (like a trackpad)
+- **Bounce effect at edges** for a native macOS feel
+
+
 ---
 
 ## 🔧 Installation (via Homebrew)
