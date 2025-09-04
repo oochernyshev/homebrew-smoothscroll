@@ -1,16 +1,24 @@
+//
+// smoothscrolld — mouse wheel smoothing with trackpad-style phases (bounce)
+//
+
 import Foundation
 import CoreGraphics
 import QuartzCore
-import Darwin   // setbuf
+import Darwin    // setbuf
 
-// Flush prints immediately (useful under launchd)
+// Flush prints immediately (useful when launched via launchd/Homebrew)
 setbuf(__stdoutp, nil)
 
 // MARK: - Version / CLI
-let appVersion: String = "0.2.17"
+let appVersion: String = "0.2.18"
 let args = CommandLine.arguments
-let debugEnabled = args.contains("--debug")
-if args.contains("--version") { print("smoothscrolld \(appVersion)"); exit(0) }
+let debugEnabled = true
+
+if args.contains("--version") {
+    print("smoothscrolld \(appVersion)")
+    exit(0)
+}
 if args.contains("--help") {
     print("""
     smoothscrolld - smooth scrolling daemon for macOS
@@ -19,45 +27,63 @@ if args.contains("--help") {
       --version   Print version and exit
       --debug     Enable debug logging
       --help      Show this message
-    """); exit(0)
+    """)
+    exit(0)
 }
 
 // MARK: - Config
 struct Config {
-    // Trackpad: pass through (macOS already smooth)
-    static let runLoopMode: CFRunLoopMode = .commonModes
-
     // Mouse smoothing (velocity model)
-    static let pixelsPerLineBase: CGFloat = 28.0   // total distance per line at slow cadence
-    static let tauVelocity: CFTimeInterval = 0.22 // seconds; larger = longer glide
-    static let timerHz: CFTimeInterval = 240.0    // 120–240 feels great
-    static let minVelStop: CGFloat = 6.0          // px/s below which we stop the timer
-    static let minAccStop: CGFloat = 0.25         // px remainder threshold to stop
+    static let pixelsPerLineBase: CGFloat = 28.0    // total px per wheel "line" at slow cadence
+    static let tauVelocity: CFTimeInterval = 0.28   // seconds; larger = longer glide
+    static let timerHz: CFTimeInterval = 240.0      // emission rate (120–240 is good)
+    static let minVelStop: CGFloat = 6.0            // px/s threshold to stop anim
+    static let minAccStop: CGFloat = 0.25           // px remainder threshold to stop
 
-    // Acceleration: boost per quick successive tick
-    static let accelGain: CGFloat = 2.0           // 0 = off; 1–3 typical
-    static let accelHalfLife: CFTimeInterval = 0.08 // seconds; <=> how “fast” counts as fast
+    // Acceleration (fast successive ticks travel farther)
+    static let accelGain: CGFloat = 2.2             // 0=off, 1–3 typical
+    static let accelHalfLife: CFTimeInterval = 0.10 // seconds; how “fast” counts as fast
 
     // Safety clamps
-    static let maxEmitPerTick: Int32 = 160        // px per timer tick
-    static let maxVelocity: CGFloat = 8000.0      // px/s
+    static let maxEmitPerTick: Int32 = 160          // px per timer tick
+    static let maxVelocity: CGFloat = 8000.0        // px/s
+
+    // Run loop mode
+    static let runLoopMode: CFRunLoopMode = .commonModes
 }
 
-// Tag for synthetic events so we ignore them inside the tap
+// MARK: - Event tags & phase values
 private let kSyntheticTag: Int64 = 0x5343524F4C // "SCROL"
+
+// CG*Phase integer values (avoid type mismatches across SDKs)
+private enum ScrollPhase: Int64 { case none = 0, began = 1, changed = 2, ended = 3, cancelled = 4, mayBegin = 5 }
+private enum MomentumPhase: Int64 { case none = 0, begin = 1, `continue` = 2, end = 3 }
 
 var gTap: CFMachPort? = nil
 
-// MARK: - Posting helper
+// MARK: - Posting helper (pixel scroll with phases)
 @inline(__always)
-func postPixelScroll(_ dy: Int32) {
-    guard dy != 0 else { return }
-    if let src = CGEventSource(stateID: .hidSystemState),
-       let ev = CGEvent(scrollWheelEvent2Source: src, units: .pixel, wheelCount: 1,
-                        wheel1: dy, wheel2: 0, wheel3: 0) {
-        ev.setIntegerValueField(.eventSourceUserData, value: kSyntheticTag)
-        ev.post(tap: .cghidEventTap)
-    }
+func postPixelScroll(_ dy: Int32,
+                     phase: ScrollPhase = .none,
+                     momentum: MomentumPhase = .none) {
+    guard let src = CGEventSource(stateID: .hidSystemState),
+          let ev = CGEvent(scrollWheelEvent2Source: src,
+                           units: .pixel,
+                           wheelCount: 1,
+                           wheel1: dy,
+                           wheel2: 0,
+                           wheel3: 0)
+    else { return }
+
+    // Make it look like a gesture (trackpad-style) so apps enable rubber-banding.
+    ev.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+    ev.setIntegerValueField(.scrollWheelEventScrollPhase, value: phase.rawValue)
+    ev.setIntegerValueField(.scrollWheelEventMomentumPhase, value: momentum.rawValue)
+
+    // Tag as synthetic so our tap ignores it
+    ev.setIntegerValueField(.eventSourceUserData, value: kSyntheticTag)
+
+    ev.post(tap: .cghidEventTap)
 }
 
 // MARK: - Wheel animator (velocity-based; mouse only)
@@ -68,6 +94,14 @@ final class WheelAnimator {
     private var lastImpulseTime: CFTimeInterval = CACurrentMediaTime()
     private var timer: CFRunLoopTimer?
 
+    // Phase state for bounce/rubber-band
+    private var needSendBegan = false
+    private var inMomentum = false
+    private var momentumStarted = false
+
+    // Delay after last user tick before switching to "momentum"
+    private let userToMomentumDelay: CFTimeInterval = 0.050
+
     func addLines(_ lines: Int32) {
         let now = CACurrentMediaTime()
         let dt = max(1e-4, now - lastImpulseTime)
@@ -76,15 +110,17 @@ final class WheelAnimator {
         // Acceleration boost: faster cadence => larger boost
         let boost = 1.0 + Config.accelGain * CGFloat(exp(-dt / Config.accelHalfLife))
 
-        // Convert desired total distance (px) into an initial velocity impulse (px/s)
-        // so that the integral of v(t) matches pixelsPerLineBase * boost for a single line.
-        // For first-order decay: integral ≈ v0 * tau  => v0 = pixels / tau
+        // Convert desired total distance (px) into a velocity impulse (px/s)
+        // For first-order decay: integral ≈ v0 * tau => v0 = pixels / tau
         let pixels = Config.pixelsPerLineBase * boost * CGFloat(lines)
         let vImpulse = pixels / CGFloat(Config.tauVelocity)
 
-        vel += vImpulse
-        // Clamp to keep things sane
-        vel = max(-Config.maxVelocity, min(Config.maxVelocity, vel))
+        vel = max(-Config.maxVelocity, min(Config.maxVelocity, vel + vImpulse))
+
+        // New user input => gesture phase (not momentum), and next emit should start with Began
+        needSendBegan = true
+        inMomentum = false
+        momentumStarted = false
 
         startTimerIfNeeded()
     }
@@ -93,9 +129,11 @@ final class WheelAnimator {
         guard timer == nil else { return }
         lastTime = CACurrentMediaTime()
         let interval = 1.0 / Config.timerHz
-        timer = CFRunLoopTimerCreateWithHandler(kCFAllocatorDefault,
-                                                CFAbsoluteTimeGetCurrent() + interval,
-                                                interval, 0, 0) { [weak self] _ in
+        timer = CFRunLoopTimerCreateWithHandler(
+            kCFAllocatorDefault,
+            CFAbsoluteTimeGetCurrent() + interval,
+            interval, 0, 0
+        ) { [weak self] _ in
             self?.tick()
         }
         if let t = timer {
@@ -103,13 +141,14 @@ final class WheelAnimator {
         }
     }
 
-    private func maybeStopTimer() {
-        if abs(vel) < Config.minVelStop && abs(accumulator) < Config.minAccStop {
-            if let t = timer { CFRunLoopTimerInvalidate(t) }
-            timer = nil
-            vel = 0
-            accumulator = 0
-        }
+    private func stopTimer() {
+        if let t = timer { CFRunLoopTimerInvalidate(t) }
+        timer = nil
+        vel = 0
+        accumulator = 0
+        needSendBegan = false
+        inMomentum = false
+        momentumStarted = false
     }
 
     private func tick() {
@@ -117,31 +156,59 @@ final class WheelAnimator {
         let dt = max(1e-4, now - lastTime)
         lastTime = now
 
+        // Switch to momentum if user hasn't ticked recently
+        if !inMomentum && (now - lastImpulseTime) > userToMomentumDelay && !needSendBegan {
+            inMomentum = true
+            momentumStarted = false // will send .begin on next emit
+        }
+
         // Exponential velocity decay
-        let decay = CGFloat(exp(-dt / Config.tauVelocity))
-        vel *= decay
+        vel *= CGFloat(exp(-dt / Config.tauVelocity))
 
         // Integrate displacement
-        let move = vel * CGFloat(dt)
-        accumulator += move
+        accumulator += vel * CGFloat(dt)
 
+        // Emit whole pixels this tick
         var emit = Int32(accumulator.rounded(.towardZero))
         if emit != 0 {
             emit = max(-Config.maxEmitPerTick, min(Config.maxEmitPerTick, emit))
             accumulator -= CGFloat(emit)
-            postPixelScroll(emit)
-            if debugEnabled { print("anim v:\(Int(vel)) dt:\(String(format: "%.4f", dt)) emit:\(emit) acc:\(String(format: "%.2f", accumulator))") }
+
+            if inMomentum {
+                // Momentum stream
+                let mom: MomentumPhase = momentumStarted ? .continue : .begin
+                momentumStarted = true
+                postPixelScroll(emit, phase: .none, momentum: mom)
+            } else {
+                // Gesture stream
+                if needSendBegan {
+                    postPixelScroll(emit, phase: .began, momentum: .none)
+                    needSendBegan = false
+                } else {
+                    postPixelScroll(emit, phase: .changed, momentum: .none)
+                }
+            }
+
+            if debugEnabled {
+                print("emit \(emit)  v:\(Int(vel))  acc:\(String(format: "%.2f", accumulator))  inMomentum:\(inMomentum)")
+            }
         }
 
-        maybeStopTimer()
+        // Stop conditions & proper end markers
+        if abs(vel) < Config.minVelStop && abs(accumulator) < Config.minAccStop {
+            if inMomentum {
+                postPixelScroll(0, phase: .none, momentum: .end)
+            } else if !needSendBegan {
+                postPixelScroll(0, phase: .ended, momentum: .none)
+            } else {
+                // Edge case: Began was requested but no pixels were emitted — still close.
+                postPixelScroll(0, phase: .ended, momentum: .none)
+            }
+            stopTimer()
+        }
     }
 
-    func reset() {
-        vel = 0
-        accumulator = 0
-        lastTime = CACurrentMediaTime()
-        lastImpulseTime = lastTime
-    }
+    func reset() { stopTimer() }
 }
 
 let mouseAnimator = WheelAnimator()
@@ -152,7 +219,7 @@ func eventCallback(proxy: CGEventTapProxy,
                    event: CGEvent,
                    refcon: UnsafeMutableRawPointer?) -> Unmanaged<CGEvent>? {
 
-    // Re-enable tap if system disabled it
+    // If the system disabled our tap, re-enable and pass event through
     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
         if let tap = gTap { CGEvent.tapEnable(tap: tap, enable: true) }
         return Unmanaged.passUnretained(event)
@@ -162,7 +229,7 @@ func eventCallback(proxy: CGEventTapProxy,
         return Unmanaged.passUnretained(event)
     }
 
-    // Ignore our synthetic events
+    // Ignore our own synthetic events
     if event.getIntegerValueField(.eventSourceUserData) == kSyntheticTag {
         return Unmanaged.passUnretained(event)
     }
@@ -174,20 +241,20 @@ func eventCallback(proxy: CGEventTapProxy,
         return Unmanaged.passUnretained(event)
     }
 
-    // Detect device kind
+    // Trackpad vs mouse
     let isContinuous = event.getIntegerValueField(.scrollWheelEventIsContinuous) != 0
 
-    // Reset per gesture (trackpads only)
-    let phase = event.getIntegerValueField(.scrollWheelEventScrollPhase)
-    if phase == 1 { // kCGScrollPhaseBegan
+    // Trackpad gesture phase (used to reset animator between gestures)
+    let phaseI64 = event.getIntegerValueField(.scrollWheelEventScrollPhase)
+    if phaseI64 == ScrollPhase.began.rawValue {
         mouseAnimator.reset()
     }
 
     if isContinuous {
-        // TRACKPAD: already smooth; pass through
+        // TRACKPAD: already smooth; pass through untouched
         return Unmanaged.passUnretained(event)
     } else {
-        // MOUSE: consume the line event and animate pixel deltas instead
+        // MOUSE: consume line event and animate pixel deltas instead
         var linesI64 = event.getIntegerValueField(.scrollWheelEventDeltaAxis1)
         if linesI64 == 0 {
             // Fallbacks (rare on mice)
@@ -197,11 +264,12 @@ func eventCallback(proxy: CGEventTapProxy,
             linesI64 = Int64(dy.rounded())
         }
         if linesI64 == 0 {
+            // Nothing to do; pass through just in case
             return Unmanaged.passUnretained(event)
         }
 
         let lines = Int32(clamping: linesI64)
-        if debugEnabled { print("mouse lines: \(lines)") }
+        if debugEnabled { print("mouse lines: \(lines) (raw64: \(linesI64))") }
 
         mouseAnimator.addLines(lines)
         // Swallow the original line event (we'll emit smooth pixels over time)
@@ -210,7 +278,7 @@ func eventCallback(proxy: CGEventTapProxy,
 }
 
 // MARK: - Event Tap Setup
-let mask: CGEventMask = (1 << CGEventType.scrollWheel.rawValue)
+let mask: CGEventMask = CGEventMask(1 << CGEventType.scrollWheel.rawValue)
 guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap,
                                   place: .headInsertEventTap,
                                   options: .defaultTap,
