@@ -63,7 +63,7 @@ var gTap: CFMachPort? = nil
 
 // MARK: - Posting helper (pixel scroll with phases)
 @inline(__always)
-func postPixelScroll(_ dy: Int32,
+fileprivate func postPixelScroll(_ dy: Int32,
                      phase: ScrollPhase = .none,
                      momentum: MomentumPhase = .none) {
     guard let src = CGEventSource(stateID: .hidSystemState),
