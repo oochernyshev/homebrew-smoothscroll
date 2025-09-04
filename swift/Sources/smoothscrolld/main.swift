@@ -34,12 +34,15 @@ struct Config {
     /// Scale multiplier for the final scroll delta
     static let scrollScale: CGFloat = 1.0
 
-    /// Scroll units: .line (typical mice) or .pixel (trackpads)
-    static let scrollUnits: CGScrollEventUnit = .line
+    /// Scroll units for synthetic events
+    static let scrollUnits: CGScrollEventUnit = .pixel
 
     /// Run loop mode
     static let runLoopMode: CFRunLoopMode = .commonModes
 }
+
+// Tag used to mark our synthetic events so we can ignore them in the tap.
+private let kSyntheticTag: Int64 = 0x5343524F4C // "SCROL" in ASCII
 
 // MARK: - Scroll Smoother
 class ScrollSmoother {
@@ -54,7 +57,7 @@ class ScrollSmoother {
         // Apply exponential smoothing
         velocity = velocity * Config.smoothingFactor + delta * (1.0 - Config.smoothingFactor)
 
-        // Apply scale and normalize by frame rate (~60fps)
+        // Apply scale and normalize by ~60fps
         return velocity * Config.scrollScale * CGFloat(dt * 60.0)
     }
 }
@@ -66,15 +69,21 @@ func eventCallback(proxy: CGEventTapProxy,
                    type: CGEventType,
                    event: CGEvent,
                    refcon: UnsafeMutableRawPointer?) -> Unmanaged<CGEvent>? {
+
+    // If the tap gets disabled, just pass events through.
     guard type == .scrollWheel else {
         return Unmanaged.passUnretained(event)
     }
 
-    // Original delta
-    let dyPoint = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1)
-    let dyFixed = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1)
-    let dyLegacy = event.getDoubleValueField(.scrollWheelEventDeltaAxis1)
+    // Ignore our own synthetic events so we don't create a feedback loop.
+    if event.getIntegerValueField(.eventSourceUserData) == kSyntheticTag {
+        return Unmanaged.passUnretained(event)
+    }
 
+    // Read original delta (prefer fixed → point → legacy)
+    let dyFixed  = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1)
+    let dyPoint  = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1)
+    let dyLegacy = event.getDoubleValueField(.scrollWheelEventDeltaAxis1)
     let dy = (dyFixed != 0.0) ? dyFixed : (dyPoint != 0.0 ? dyPoint : dyLegacy)
 
     // Ignore no-op events
@@ -82,7 +91,9 @@ func eventCallback(proxy: CGEventTapProxy,
         return Unmanaged.passUnretained(event)
     }
 
-    print("RAW delta: \(dy)")
+    if debugEnabled {
+        print("RAW delta: \(dy)")
+    }
 
     // Smooth delta
     let smoothDY = smoother.smooth(delta: CGFloat(dy))
@@ -91,30 +102,38 @@ func eventCallback(proxy: CGEventTapProxy,
         print("Scroll delta: \(dy) → smoothed: \(smoothDY)")
     }
 
-    // Scale up if too small (avoid rounding to zero)
-    let adjusted = max(min(smoothDY * 10, 100), -100)  // clamp to ±100
+    // Scale & clamp (avoid rounding to 0 and crazy spikes)
+    let adjusted = max(min(smoothDY * 10, 100), -100)
 
-    if let newEvent = CGEvent(scrollWheelEvent2Source: nil,
-                              units: .pixel,   // use pixel for trackpads
+    // Create a new synthetic scroll event (tagged) and post it
+    if let src = CGEventSource(stateID: .hidSystemState),
+       let newEvent = CGEvent(scrollWheelEvent2Source: src,
+                              units: Config.scrollUnits,
                               wheelCount: 1,
                               wheel1: Int32(adjusted),
                               wheel2: 0,
                               wheel3: 0) {
-        // Post at hardware event tap
+
+        // Mark event so our tap will ignore it
+        newEvent.setIntegerValueField(.eventSourceUserData, value: kSyntheticTag)
+
+        // Post at hardware tap so it behaves like a real scroll
         newEvent.post(tap: .cghidEventTap)
+
+        // Drop original event to avoid double-scrolling
         return nil
     }
 
-    // Fallback: pass original event
+    // Fallback: pass original event if we couldn't synthesize
     return Unmanaged.passUnretained(event)
 }
 
 // MARK: - Event Tap Setup
-let mask = (1 << CGEventType.scrollWheel.rawValue)
+let mask: CGEventMask = (1 << CGEventType.scrollWheel.rawValue)
 guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap,
                                   place: .headInsertEventTap,
                                   options: .defaultTap,
-                                  eventsOfInterest: CGEventMask(mask),
+                                  eventsOfInterest: mask,
                                   callback: eventCallback,
                                   userInfo: nil) else {
     fatalError("Failed to create event tap. Check Accessibility permissions.")
@@ -125,5 +144,4 @@ CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, Config.runLoopMode)
 CGEvent.tapEnable(tap: tap, enable: true)
 
 print("Starting smoothscrolld service - OK")
-
 CFRunLoopRun()
