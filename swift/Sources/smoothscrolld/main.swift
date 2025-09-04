@@ -128,7 +128,7 @@ func eventCallback(proxy: CGEventTapProxy,
     }
 
     // Trackpad gesture phase: reset when a new gesture begins
-    let phase = event.getIntegerValueField(.scrollWheelEventPhase)
+    let phase = event.getIntegerValueField(.scrollWheelEventScrollPhase)
     if phase == 1 { // kCGScrollPhaseBegan == 1
         smoother.reset()
     }
