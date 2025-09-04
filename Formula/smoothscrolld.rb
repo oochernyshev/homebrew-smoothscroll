@@ -1,8 +1,8 @@
 class Smoothscrolld < Formula
   desc "Background daemon for smooth mouse scrolling on macOS"
   homepage "https://github.com/oochernyshev/homebrew-smoothscroll"
-  url "https://github.com/oochernyshev/homebrew-smoothscroll/archive/refs/tags/v0.2.24.tar.gz"
-  sha256 "8ff3ed472a53054cb642a64d566b9f39d587ed2898ba82c4eed970fe169203b8"
+  url "https://github.com/oochernyshev/homebrew-smoothscroll/archive/refs/tags/v0.2.25.tar.gz"
+  sha256 "9330addc9e4076318a0dc6b19aef36644ae96069f4db16e7098bfb4576d81f52"
   license "MIT"
 
   depends_on xcode: :build
