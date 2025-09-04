@@ -167,22 +167,24 @@ func eventCallback(proxy: CGEventTapProxy,
         // MOUSE: consume the line event and animate pixel deltas instead
 
         // Prefer legacy integer line delta for mice
-        var lines = event.getIntegerValueField(.scrollWheelEventDeltaAxis1)
-        if lines == 0 {
+        var linesI64 = event.getIntegerValueField(.scrollWheelEventDeltaAxis1)
+        if linesI64 == 0 {
             // Fallbacks (rare on mice)
             let dyFixed = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1)
             let dyPoint = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1)
             let dy = (dyFixed != 0.0) ? dyFixed : dyPoint
-            lines = Int32(dy.rounded())
+            linesI64 = Int64(dy.rounded())
         }
 
-        if lines == 0 {
-            // Nothing to do; pass through just in case
+        if linesI64 == 0 {
             return Unmanaged.passUnretained(event)
         }
 
+        // Clamp to Int32 for wheel1 + animator input
+        let lines = Int32(clamping: linesI64)
+
         if debugEnabled {
-            print("mouse lines: \(lines)")
+            print("mouse lines: \(lines) (raw64: \(linesI64))")
         }
 
         mouseAnimator.addLines(lines)
