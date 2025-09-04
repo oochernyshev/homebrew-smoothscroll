@@ -52,5 +52,3 @@ brew services list
 
 MIT License © 2025 [Oleg Chernyshev](https://github.com/oochernyshev)
 See [LICENSE](LICENSE) for details.
-
-```
