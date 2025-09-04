@@ -56,6 +56,7 @@ struct Config {
     static let minAccStop: CGFloat = 0.02                  // px subpixel remainder to stop
     static let maxIntEmitPerTick: Int32 = 160              // safety (legacy int field)
     static let maxFloatEmitPerTick: CGFloat = 50.0         // safety (point/fixed fields)
+    static let maxVelocity: CGFloat = 8000.0
 
     // Run loop mode
     static let runLoopMode: CFRunLoopMode = .commonModes
