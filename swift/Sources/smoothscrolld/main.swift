@@ -7,9 +7,9 @@ import Darwin      // for setbuf
 setbuf(__stdoutp, nil)
 
 // MARK: - Version / CLI
-let appVersion: String = "0.2.7"
+let appVersion: String = "0.2.14"
 let args = CommandLine.arguments
-let debugEnabled = args.contains("--debug")
+let debugEnabled = true
 
 if args.contains("--version") {
     print("smoothscrolld \(appVersion)")
